@@ -1,0 +1,10 @@
+﻿{
+  "Name": "SchedulePlanner",
+  "Author": "kotae",
+  "Version": "1.0.0",
+  "Description": "Plan your days by adding tasks to the calendar.",
+  "UniqueID": "kotae.SchedulePlanner",
+  "EntryDll": "SchedulePlanner.dll",
+  "MinimumApiVersion": "3.3.0",
+  "UpdateKeys": [ "GitHub:kotae4/SchedulePlanner" ]
+}
