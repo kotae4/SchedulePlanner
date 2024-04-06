@@ -10,20 +10,36 @@ using StardewModdingAPI.Utilities;
 using StardewValley;
 using StardewValley.Menus;
 using StardewValley.BellsAndWhistles;
+using StardewValley.GameData.Characters;
+using StardewValley.GameData;
+using StardewValley.TokenizableStrings;
+using StardewValley.Network;
+using static StardewValley.Menus.Billboard;
 
 namespace kotae.SchedulePlanner
 {
     public class CalendarMenu : IClickableMenu
     {
+        // NOTE: see StardewValley.Utility.getDaysOfBooksellerThisSeason()
+        static readonly int[] PossibleBookSellerDays_Spring = new int[5] { 11, 12, 21, 22, 25 };
+        static readonly int[] PossibleBookSellerDays_Summer = new int[5] { 9, 12, 18, 25, 27 };
+        static readonly int[] PossibleBookSellerDays_Fall = new int[8] { 4, 7, 8, 9, 12, 19, 22, 25 };
+        static readonly int[] PossibleBookSellerDays_Winter = new int[6] { 5, 11, 12, 19, 22, 24 };
+
         Texture2D m_CalendarTex;
         string nightMarketLocalized = "", wizardBirthdayLocalized = "", hoverText = "";
         ClickableTextureComponent m_PrevSeasonButton, m_NextSeasonButton, m_PrevYearButton, m_NextYearButton;
         AgendaMenu m_AgendaMenu;
         // game uses:
         // "spring", "summer", "fall", "winter" case sensitive, non-localized
-        Dictionary<string, List<ClickableTextureComponent>> m_CalendarDaysBySeasonName;
+        Dictionary<Season, List<ClickableTextureComponent>> m_CalendarDaysBySeasonName;
+        Dictionary<SDate, List<NPC>> m_BirthdayDict;
+        List<Billboard.BillboardEvent> m_BillboardEventsByDay = new List<Billboard.BillboardEvent>();
+        // a BillboardDay is a collection of BillboardEvents with aggregate HoverText and Type properties
+        Dictionary<int, Billboard.BillboardDay> m_BillboardDayByDay = new Dictionary<int, BillboardDay>();
+        List<int> m_BookSellerDaysThisSeason = new List<int>();
 
-        string m_ActiveSeason = "spring";
+        Season m_ActiveSeason = Season.Spring;
         int m_ActiveYear = 1;
 
 
@@ -33,6 +49,7 @@ namespace kotae.SchedulePlanner
             // we kinda need to instantiate a new instance each time because the base ctor sets game state (time stops, player movement halts, etc)
             // but instantiating all these assets each and every time is really inefficient, so i'm thinking we make them static and have a static bool HasInitializedAssets and check that each time.
             // should speed things up. not that they're slow right now, but faster is faster than fast, so let's aim for faster always.
+            // REVISIT: i did not do the above and i can't remember why.
             // NOTE:
             // so, we want our calendar to show everything the game's calendar shows, BUT also:
             // 1. left / right arrows next to the Season that'll load up the prev / next season (do you like writing obvious things? no)
@@ -42,7 +59,7 @@ namespace kotae.SchedulePlanner
             // it's worth noting that the festival and the night market icons are animated...
             // also that villager sprites (to denote birthdays) vary in height, so top right might not be a good idea for our icon
             // finally, we don't need to display the wedding icon on the calendar since the ceremony isn't miss-able, skippable, nor does it effect gameplay in any way (time freezes at 6am while the cutscene happens)
-            m_ActiveSeason = Game1.currentSeason;
+            m_ActiveSeason = Game1.season;
             m_ActiveYear = Game1.year;
             base.width = 1204;
             base.height = 792;
@@ -90,67 +107,208 @@ namespace kotae.SchedulePlanner
                 downNeighborID = 0
             };
 
-            m_CalendarDaysBySeasonName = new Dictionary<string, List<ClickableTextureComponent>>();
-            Dictionary<SDate, NPC> birthdayDict = new Dictionary<SDate, NPC>();
-            foreach (NPC npc in Utility.getAllCharacters())
-            {
-                if ((npc.isVillager()) && (!string.IsNullOrEmpty(npc.Birthday_Season)) && ((Game1.player.friendshipData.ContainsKey(npc.Name)) || ((!npc.Name.Equals("Dwarf") && !npc.Name.Equals("Sandy")) && !npc.Name.Equals("Krobus"))))
-                {
-                    SDate npcBirthdate = new SDate(npc.Birthday_Day, npc.Birthday_Season);
-                    if (!birthdayDict.ContainsKey(npcBirthdate))
-                        birthdayDict.Add(npcBirthdate, npc);
-                }
-            }
-            nightMarketLocalized = Game1.content.LoadString(@"Strings\UI:Billboard_NightMarket");
-            wizardBirthdayLocalized = Game1.content.LoadString(@"Strings\UI:Billboard_Birthday", Game1.getCharacterFromName("Wizard", true).displayName);
+            m_CalendarDaysBySeasonName = new Dictionary<Season, List<ClickableTextureComponent>>();
+            m_BirthdayDict = new Dictionary<SDate, List<NPC>>();
+            PopulateBirthdays(ref m_BirthdayDict);
+            PopulateEventsForSeason(m_ActiveYear, m_ActiveSeason, m_BirthdayDict, ref m_BillboardDayByDay);
             for (int seasonIndex = 0; seasonIndex <= 3; seasonIndex++)
             {
-                string seasonName = (seasonIndex == 0 ? "spring" : seasonIndex == 1 ? "summer" : seasonIndex == 2 ? "fall" : "winter");
-                m_CalendarDaysBySeasonName.Add(seasonName, new List<ClickableTextureComponent>());
+                Season season = (seasonIndex == 0 ? Season.Spring : seasonIndex == 1 ? Season.Summer : seasonIndex == 2 ? Season.Fall : Season.Winter);
+                //string seasonName = season.ToString().ToLower();
+                m_CalendarDaysBySeasonName.Add(season, new List<ClickableTextureComponent>());
                 for (int dayIndex = 1; dayIndex <= 28; dayIndex++)
                 {
-                    SDate curDate = new SDate(dayIndex, seasonName);
-                    string name = "";
-                    string buttonHoverText = "";
-                    NPC birthdayNPC = birthdayDict.ContainsKey(curDate) ? birthdayDict[curDate] : null;
-                    if (Utility.isFestivalDay(dayIndex, seasonName))
-                    {
-                        name = Game1.temporaryContent.Load<Dictionary<string, string>>(@"Data\Festivals\" + seasonName + dayIndex)["name"];
-                    }
-                    else
-                    {
-                        if (birthdayNPC != null)
-                        {
-                            if ((birthdayNPC.displayName.Last<char>() == 's') ||
-                                ((LocalizedContentManager.CurrentLanguageCode == LocalizedContentManager.LanguageCode.de) &&
-                                    (((birthdayNPC.displayName.Last<char>() == 'x') ||
-                                    (birthdayNPC.displayName.Last<char>() == '\x00df')) ||
-                                    (birthdayNPC.displayName.Last<char>() == 'z'))))
-                            {
-                                buttonHoverText = Game1.content.LoadString(@"Strings\UI:Billboard_SBirthday", birthdayNPC.displayName);
-                            }
-                            else
-                            {
-                                buttonHoverText = Game1.content.LoadString(@"Strings\UI:Billboard_Birthday", birthdayNPC.displayName);
-                            }
-                        }
-                        if ((seasonName == "winter") && (dayIndex >= 15) && (dayIndex <= 17))
-                        {
-                            name = nightMarketLocalized;
-                        }
-                    }
-                    // TO-DO:
-                    // paginate the seasons? nah, lose efficiency that way since each day would need to be checked for current season's holidays.
-                    ClickableTextureComponent calendarDayButton = new ClickableTextureComponent(name, new Rectangle((base.xPositionOnScreen + 152) + ((((dayIndex - 1) % 7) * 32) * 4), (base.yPositionOnScreen + 200) + ((((dayIndex - 1) / 7) * 32) * 4), 124, 124), name, buttonHoverText, (birthdayNPC != null) ? birthdayNPC.Sprite.Texture : null, (birthdayNPC != null) ? new Rectangle(0, 0, 16, 24) : Rectangle.Empty, 1f, false)
+                    SDate curDate = new SDate(dayIndex, season);
+                    ClickableTextureComponent calendarDayButton = new ClickableTextureComponent(curDate.ToString(), new Rectangle((base.xPositionOnScreen + 152) + ((((dayIndex - 1) % 7) * 32) * 4), (base.yPositionOnScreen + 200) + ((((dayIndex - 1) / 7) * 32) * 4), 124, 124), string.Empty, string.Empty, null, Rectangle.Empty, 1f, false)
                     {
                         myID = dayIndex,
                         rightNeighborID = ((dayIndex % 7) != 0) ? (dayIndex + 1) : -1,
                         leftNeighborID = ((dayIndex % 7) != 1) ? (dayIndex - 1) : -1,
                         downNeighborID = dayIndex + 7,
-                        upNeighborID = (dayIndex > 7) ? (dayIndex - 7) : 1000
+                        upNeighborID = (dayIndex > 7) ? (dayIndex - 7) : -1
                     };
                     // we're skipping wedding days. remember your own wedding.
-                    m_CalendarDaysBySeasonName[seasonName].Add(calendarDayButton);
+                    m_CalendarDaysBySeasonName[season].Add(calendarDayButton);
+                }
+            }
+        }
+
+        private void PopulateBirthdays(ref Dictionary<SDate, List<NPC>> birthdayDict)
+        {
+            birthdayDict.Clear();
+            foreach (NPC npc in Utility.getAllCharacters())
+            {
+                CalendarBehavior? calendarBehavior = npc.GetData()?.Calendar;
+                if ((calendarBehavior == null)
+                    || (calendarBehavior == CalendarBehavior.HiddenAlways)
+                    || ((calendarBehavior == CalendarBehavior.HiddenUntilMet) && (Game1.player.friendshipData.ContainsKey(npc.Name) == false))
+                    || (npc.IsVillager == false)
+                    || (string.IsNullOrEmpty(npc.Birthday_Season)))
+                {
+                    continue;
+                }
+                SDate npcBirthdate = new SDate(npc.Birthday_Day, npc.Birthday_Season);
+                if (birthdayDict.ContainsKey(npcBirthdate))
+                {
+                    birthdayDict[npcBirthdate].Add(npc);
+                }
+                else
+                {
+                    birthdayDict.Add(npcBirthdate, new List<NPC>() { npc });
+                }
+            }
+        }
+
+        private void PopulateBookSellerDaysForSeason(int year, int seasonIndex, ref List<int> bookSellerDaysThisSeason)
+        {
+            bookSellerDaysThisSeason.Clear();
+            Random rnd = Utility.CreateRandom(year * 11, Game1.uniqueIDForThisGame, seasonIndex);
+            int[] possibleDays;
+            switch (seasonIndex)
+            {
+                case 0:
+                    possibleDays = PossibleBookSellerDays_Spring;
+                    break;
+                case 1:
+                    possibleDays = PossibleBookSellerDays_Summer;
+                    break;
+                case 2:
+                    possibleDays = PossibleBookSellerDays_Fall;
+                    break;
+                case 3:
+                    possibleDays = PossibleBookSellerDays_Winter;
+                    break;
+                default:
+                    throw new Exception($"Invalid season index: {seasonIndex}");
+            }
+            int randIndex = rnd.Next(possibleDays.Length);
+            bookSellerDaysThisSeason.Add(possibleDays[randIndex]);
+            bookSellerDaysThisSeason.Add(possibleDays[(randIndex + possibleDays.Length / 2) % possibleDays.Length]);
+        }
+
+        private void PopulateEventsForSeason(int year, Season season, Dictionary<SDate, List<NPC>> cachedBirthdays, ref Dictionary<int, Billboard.BillboardDay> eventsData)
+        {
+            int seasonIndex = (int)season;
+            string seasonName = Utility.getSeasonNameFromNumber(seasonIndex);
+            eventsData.Clear();
+            PopulateBookSellerDaysForSeason(year, seasonIndex, ref m_BookSellerDaysThisSeason);
+            SDate activeDate;
+            PassiveFestivalData passiveFestivalData;
+            string festivalId;
+            string festivalName;
+            for (int day = 1; day <= 28; day++)
+            {
+                m_BillboardEventsByDay.Clear();
+                activeDate = new SDate(day, seasonName);
+                if (Utility.isFestivalDay(day, season))
+                {
+                    festivalId = seasonName + day.ToString();
+                    festivalName = Game1.temporaryContent.Load<Dictionary<string, string>>(@"Data\Festivals\" + festivalId)["name"];
+                    m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.Festival, new string[1] { festivalId }, festivalName));
+                }
+                if ((Utility.TryGetPassiveFestivalDataForDay(day, season, null, out festivalId, out passiveFestivalData, ignoreConditionsCheck: true))
+                    && (passiveFestivalData?.ShowOnCalendar ?? false))
+                {
+                    festivalName = TokenParser.ParseText(passiveFestivalData.DisplayName);
+                    if (GameStateQuery.CheckConditions(passiveFestivalData.Condition) == false)
+                    {
+                        m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.PassiveFestival, new string[1] { festivalId }, "???")
+                        {
+                            locked = true
+                        });
+                    }
+                    else
+                    {
+                        m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.PassiveFestival, new string[1] { festivalId }, festivalName));
+                    }
+                }
+                if ((season == Season.Summer) && ((day == 20) || (day == 21)))
+                {
+                    festivalName = Game1.content.LoadString(@"Strings\1_6_Strings:TroutDerby");
+                    m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.FishingDerby, Array.Empty<string>(), festivalName));
+                }
+                else if ((season == Season.Winter) && ((day == 12) || (day == 13)))
+                {
+                    festivalName = Game1.content.LoadString(@"Strings\1_6_Strings:SquidFest");
+                    m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.FishingDerby, Array.Empty<string>(), festivalName));
+                }
+                if (m_BookSellerDaysThisSeason.Contains(day))
+                {
+                    festivalName = Game1.content.LoadString(@"Strings\1_6_Strings:Bookseller");
+                    m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.Bookseller, Array.Empty<string>(), festivalName));
+                }
+                foreach (KeyValuePair<SDate, List<NPC>> kv in cachedBirthdays)
+                {
+                    if ((kv.Key.Season != season) || (kv.Key.Day != day))
+                        continue;
+                    foreach (NPC npc in kv.Value)
+                    {
+                        char lastChar = npc.displayName.Last();
+                        string displayText = (((lastChar == 's')
+                            || ((LocalizedContentManager.CurrentLanguageCode == LocalizedContentManager.LanguageCode.de)
+                            && ((lastChar == 'x') || (lastChar == 'ß') || (lastChar == 'z'))))
+                            ? Game1.content.LoadString("Strings\\UI:Billboard_SBirthday", npc.displayName)
+                            : Game1.content.LoadString("Strings\\UI:Billboard_Birthday", npc.displayName));
+                        Texture2D npcTexture;
+                        try
+                        {
+                            npcTexture = Game1.content.Load<Texture2D>(@"Characters\" + npc.getTextureName());
+                        }
+                        catch
+                        {
+                            npcTexture = npc.Sprite.Texture;
+                        }
+                        m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.Birthday, new string[1] { npc.Name }, displayText, npcTexture, npc.getMugShotSourceRect()));
+                    }
+                }
+                HashSet<Farmer> seenFarmers = new HashSet<Farmer>();
+                FarmerCollection onlineFarmers = Game1.getOnlineFarmers();
+                foreach (Farmer farmer in onlineFarmers)
+                {
+                    if ((seenFarmers.Contains(farmer)) || (farmer.isEngaged() == false) || (farmer.hasCurrentOrPendingRoommate()))
+                        continue;
+                    string spouseName = "";
+                    WorldDate weddingDate = null;
+                    NPC spouse = Game1.getCharacterFromName(farmer.spouse);
+                    if (spouse != null)
+                    {
+                        weddingDate = farmer.friendshipData[farmer.spouse].WeddingDate;
+                        spouseName = spouse.displayName;
+                    }
+                    else
+                    {
+                        long? spouseId = farmer.team.GetSpouse(farmer.UniqueMultiplayerID);
+                        if (spouseId.HasValue)
+                        {
+                            Farmer spouseFarmer = Game1.getFarmerMaybeOffline(spouseId.Value);
+                            if ((spouseFarmer != null) && (onlineFarmers.Contains(spouseFarmer)))
+                            {
+                                weddingDate = farmer.team.GetFriendship(farmer.UniqueMultiplayerID, spouseId.Value).WeddingDate;
+                                spouseName = spouseFarmer.Name;
+                                seenFarmers.Add(spouseFarmer);
+                            }
+                        }
+                    }
+                    if (weddingDate != null)
+                    {
+                        if (weddingDate.TotalDays < Game1.Date.TotalDays)
+                        {
+                            // wedding is still pending, will occur next day
+                            // does not check for rain or festival days
+                            weddingDate = new WorldDate(Game1.Date);
+                            weddingDate.TotalDays++;
+                        }
+                        if ((weddingDate.Season == season) && (weddingDate.DayOfMonth == day))
+                        {
+                            m_BillboardEventsByDay.Add(new Billboard.BillboardEvent(Billboard.BillboardEventType.Wedding, new string[2] { farmer.Name, spouseName }, Game1.content.LoadString(@"Strings\UI:Calendar_Wedding", farmer.Name, spouseName)));
+                            seenFarmers.Add(farmer);
+                        }
+                    }
+                }
+                if (m_BillboardEventsByDay.Count > 0)
+                {
+                    Billboard.BillboardDay billboardDay = new Billboard.BillboardDay(m_BillboardEventsByDay.ToArray());
+                    eventsData.Add(day, billboardDay);
                 }
             }
         }
@@ -176,7 +334,7 @@ namespace kotae.SchedulePlanner
 
             for (int seasonIndex = 0; seasonIndex <= 3; seasonIndex++)
             {
-                string seasonName = (seasonIndex == 0 ? "spring" : seasonIndex == 1 ? "summer" : seasonIndex == 2 ? "fall" : "winter");
+                Season seasonName = (seasonIndex == 0 ? Season.Spring : seasonIndex == 1 ? Season.Summer : seasonIndex == 2 ? Season.Fall : Season.Winter);
                 for (int dayIndex = 1; dayIndex <= 28; dayIndex++)
                 {
                     ClickableTextureComponent dayButton = m_CalendarDaysBySeasonName[seasonName][dayIndex - 1];
@@ -189,19 +347,25 @@ namespace kotae.SchedulePlanner
         public void BringToFront()
         {
             Utils.PrepareGameForInteractableMenu();
-            m_ActiveSeason = Game1.currentSeason;
+            bool hasSeasonChanged = false;
+            if (m_ActiveSeason != Game1.season)
+                hasSeasonChanged = true;
+            m_ActiveSeason = Game1.season;
             m_ActiveYear = Game1.year;
             PositionControls();
+            PopulateBirthdays(ref m_BirthdayDict);
+            if (hasSeasonChanged)
+                PopulateEventsForSeason(m_ActiveYear, m_ActiveSeason, m_BirthdayDict, ref m_BillboardDayByDay);
         }
 
         public override void draw(SpriteBatch b)
         {
             // background and main panel
             b.Draw(Game1.fadeToBlackRect, Game1.graphics.GraphicsDevice.Viewport.Bounds, (Color)(Color.Black * 0.75f));
-            b.Draw(m_CalendarTex, new Vector2((float)base.xPositionOnScreen, (float)base.yPositionOnScreen), new Rectangle?(new Rectangle(0, 198, 301, 198)), Color.White, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
+            b.Draw(m_CalendarTex, new Vector2((float)base.xPositionOnScreen, (float)base.yPositionOnScreen), new Rectangle(0, 198, 301, 198), Color.White, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
 
             // season + year header
-            string seasonHeaderStr = Utility.getSeasonNameFromNumber(Utility.getSeasonNumber(m_ActiveSeason));
+            string seasonHeaderStr = Utility.getSeasonNameFromNumber((int)m_ActiveSeason);
             string yearHeaderStr = Game1.content.LoadString(@"Strings\UI:Billboard_Year", m_ActiveYear);
             b.DrawString(Game1.dialogueFont, seasonHeaderStr, new Vector2((float)(base.xPositionOnScreen + 165), (float)(base.yPositionOnScreen + 80)), Game1.textColor);
             // this draws the number and the "Year" string. i think the number part is always an arabic numeral.
@@ -217,9 +381,9 @@ namespace kotae.SchedulePlanner
             m_NextYearButton.bounds.X = ((base.xPositionOnScreen + 448) + yearStrWidth + 5);
             // NOTE:
             // i *think* we have to call draw on the button itself for the hover scale to work
-            if (m_ActiveSeason != "spring")
+            if (m_ActiveSeason != Season.Spring)
                 m_PrevSeasonButton.draw(b);
-            if (m_ActiveSeason != "winter")
+            if (m_ActiveSeason != Season.Winter)
                 m_NextSeasonButton.draw(b);
             if (m_ActiveYear > 1)
                 m_PrevYearButton.draw(b);
@@ -232,26 +396,54 @@ namespace kotae.SchedulePlanner
             for (int dayIndex = 0; dayIndex < calendarDayButtons.Count; dayIndex++)
             {
                 activeDate = new SDate(dayIndex + 1, m_ActiveSeason, m_ActiveYear);
-                gameDate = new SDate(Game1.dayOfMonth, Game1.currentSeason, Game1.year);
+                gameDate = new SDate(Game1.dayOfMonth, Game1.season, Game1.year);
                 activeCalendarDayButton = calendarDayButtons[dayIndex];
-                if (activeCalendarDayButton.name.Length > 0)
+                Billboard.BillboardDay billboardDay;
+                if (m_BillboardDayByDay.TryGetValue(activeCalendarDayButton.myID, out billboardDay))
                 {
-                    if (activeCalendarDayButton.name.Equals(nightMarketLocalized))
+                    // hovertext is event.DisplayName
+                    if (billboardDay.Texture != null)
                     {
-                        Utility.drawWithShadow(b, Game1.mouseCursors, new Vector2((float)(activeCalendarDayButton.bounds.X + 12), (activeCalendarDayButton.bounds.Y + 60) - (Game1.dialogueButtonScale / 2f)), new Rectangle(346, 392, 8, 8), Color.White, 0f, Vector2.Zero, 4f, false, 1f, -1, -1, 0.35f);
+                        b.Draw(billboardDay.Texture,
+                            new Vector2(activeCalendarDayButton.bounds.X + 48, activeCalendarDayButton.bounds.Y + 28), 
+                            billboardDay.TextureSourceRect, Color.White, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
                     }
-                    else
+                    if (billboardDay.Type.HasFlag(Billboard.BillboardEventType.PassiveFestival))
                     {
-                        // NOTE:
-                        // this draws the festival days that aren't night market days. it's animated in the sprite, that's what the game ticks are used for i think.
-                        Utility.drawWithShadow(b, m_CalendarTex, new Vector2((float)(activeCalendarDayButton.bounds.X + 40), (activeCalendarDayButton.bounds.Y + 56) - (Game1.dialogueButtonScale / 2f)), new Rectangle(1 + (((int)((Game1.currentGameTime.TotalGameTime.TotalMilliseconds % 600.0) / 100.0)) * 14), 398, 14, 12), Color.White, 0f, Vector2.Zero, 4f, false, 1f, -1, -1, 0.35f);
+                        Utility.drawWithShadow(b, Game1.mouseCursors, 
+                            new Vector2(activeCalendarDayButton.bounds.X + 12, (float)(activeCalendarDayButton.bounds.Y + 60) - Game1.dialogueButtonScale / 2f), 
+                            new Rectangle(346, 392, 8, 8), 
+                            billboardDay.GetEventOfType(BillboardEventType.PassiveFestival).locked ? (Color.Black * 0.3f) : Color.White, 
+                            0f, Vector2.Zero, 4f, flipped: false, 1f);
                     }
-                }
-                if (activeCalendarDayButton.hoverText.Length > 0)
-                {
-                    // pretty sure this draws the villager icon if it's a birthday, the festival icon if it's a festival day, and the night market icon if... 
-                    // well you see, it draws the night market icon if the night market icon should be drawn which is true under certain circumstances and those circumstances include whether the game's current season is winter and if the current day is between the integer 15 representing the 15th day of the winter season and the integer 17 representing the 17th day of the season the game is currently in which as mentioned before must be winter and only under these circumstances will the night market icon be drawn
-                    b.Draw(activeCalendarDayButton.texture, new Vector2((float)(activeCalendarDayButton.bounds.X + 48), (float)(activeCalendarDayButton.bounds.Y + 28)), new Rectangle?(activeCalendarDayButton.sourceRect), Color.White, 0f, Vector2.Zero, (float)4f, SpriteEffects.None, 1f);
+                    if (billboardDay.Type.HasFlag(Billboard.BillboardEventType.Festival))
+                    {
+                        Utility.drawWithShadow(b, m_CalendarTex, 
+                            new Vector2(activeCalendarDayButton.bounds.X + 40, (float)(activeCalendarDayButton.bounds.Y + 56) - Game1.dialogueButtonScale / 2f), 
+                            new Rectangle(1 + (int)(Game1.currentGameTime.TotalGameTime.TotalMilliseconds % 600.0 / 100.0) * 14, 398, 14, 12), 
+                            Color.White, 0f, Vector2.Zero, 4f, flipped: false, 1f);
+                    }
+                    if (billboardDay.Type.HasFlag(Billboard.BillboardEventType.FishingDerby))
+                    {
+                        Utility.drawWithShadow(b, Game1.mouseCursors_1_6, 
+                            new Vector2(activeCalendarDayButton.bounds.X + 8, (float)(activeCalendarDayButton.bounds.Y + 60) - Game1.dialogueButtonScale / 2f), 
+                            new Rectangle(103, 2, 10, 11), 
+                            Color.White, 0f, Vector2.Zero, 4f, flipped: false, 1f);
+                    }
+                    if (billboardDay.Type.HasFlag(Billboard.BillboardEventType.Wedding))
+                    {
+                        b.Draw(Game1.mouseCursors2, 
+                            new Vector2(activeCalendarDayButton.bounds.Right - 56, activeCalendarDayButton.bounds.Top - 12), 
+                            new Rectangle(112, 32, 16, 14), 
+                            Color.White, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
+                    }
+                    if (billboardDay.Type.HasFlag(Billboard.BillboardEventType.Bookseller))
+                    {
+                        b.Draw(Game1.mouseCursors_1_6, 
+                            new Vector2((float)(activeCalendarDayButton.bounds.Right - 72) - 2f * (float)Math.Sin((Game1.currentGameTime.TotalGameTime.TotalSeconds + (double)dayIndex * 0.3) * 3.0), (float)(activeCalendarDayButton.bounds.Top + 52) - 2f * (float)Math.Cos((Game1.currentGameTime.TotalGameTime.TotalSeconds + (double)dayIndex * 0.3) * 2.0)), 
+                            new Rectangle(71, 63, 8, 15), 
+                            Color.White, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
+                    }
                 }
                 // draws icon if there are any tasks scheduled for this day
                 if ((ModEntry.Instance != null) && (ModEntry.Instance.Schedule != null) && ((ModEntry.Instance.Schedule.GetNumTasksForDate(activeDate)) > 0))
@@ -315,7 +507,7 @@ namespace kotae.SchedulePlanner
             base.drawMouse(b);
             if (hoverText.Length > 0)
             {
-                IClickableMenu.drawHoverText(b, hoverText, Game1.dialogueFont, 0, 0, -1, null, -1, null, null, 0, -1, -1, -1, -1, 1f, null, null);
+                IClickableMenu.drawHoverText(b, hoverText, Game1.dialogueFont);
             }
         }
 
@@ -339,20 +531,10 @@ namespace kotae.SchedulePlanner
                 {
                     activeDate = new SDate(dayIndex + 1, m_ActiveSeason, m_ActiveYear);
                     dayButton = calendarDayButtons[dayIndex];
+                    BillboardDay dayEventData;
                     if (dayButton.bounds.Contains(x, y))
                     {
-                        if (dayButton.hoverText.Length > 0)
-                        {
-                            if (dayButton.hoverText.Equals(wizardBirthdayLocalized))
-                            {
-                                dayButton.hoverText = dayButton.hoverText + Environment.NewLine + nightMarketLocalized;
-                            }
-                            hoverText = dayButton.hoverText;
-                        }
-                        else
-                        {
-                            hoverText = dayButton.label;
-                        }
+                        hoverText = (m_BillboardDayByDay.TryGetValue(dayButton.myID, out dayEventData) ? dayEventData.HoverText : string.Empty);
                         int numNonrecurrent, numWeeklies, numDailies;
                         int numTasks = ModEntry.Instance.Schedule.GetNumTasksForDate(activeDate, out numNonrecurrent, out numWeeklies, out numDailies);
                         if ((ModEntry.Instance != null) && (ModEntry.Instance.Schedule != null) && (numTasks > 0))
@@ -379,23 +561,28 @@ namespace kotae.SchedulePlanner
         {
             // base checks if the close button was clicked and handles that
             base.receiveLeftClick(x, y, playSound);
+            bool hasSeasonChanged = false;
             if (m_PrevSeasonButton.containsPoint(x, y))
             {
-                m_ActiveSeason = m_ActiveSeason == "summer" ? "spring" : m_ActiveSeason == "fall" ? "summer" : m_ActiveSeason == "winter" ? "fall" : "spring";
+                m_ActiveSeason = m_ActiveSeason == Season.Summer ? Season.Spring : m_ActiveSeason == Season.Fall ? Season.Summer : m_ActiveSeason == Season.Winter ? Season.Fall : Season.Spring;
+                hasSeasonChanged = true;
             }
             else if (m_NextSeasonButton.containsPoint(x, y))
             {
-                m_ActiveSeason = m_ActiveSeason == "spring" ? "summer" : m_ActiveSeason == "summer" ? "fall" : "winter";
+                m_ActiveSeason = m_ActiveSeason == Season.Spring ? Season.Summer : m_ActiveSeason == Season.Summer ? Season.Fall : Season.Winter;
+                hasSeasonChanged = true;
             }
             else if (m_PrevYearButton.containsPoint(x, y))
             {
                 m_ActiveYear = m_ActiveYear > 1 ? m_ActiveYear - 1 : 1;
-                m_ActiveSeason = "winter";
+                m_ActiveSeason = Season.Winter;
+                hasSeasonChanged = true;
             }
             else if (m_NextYearButton.containsPoint(x, y))
             {
                 m_ActiveYear += 1;
-                m_ActiveSeason = "spring";
+                m_ActiveSeason = Season.Spring;
+                hasSeasonChanged = true;
             }
             else
             {
@@ -421,6 +608,10 @@ namespace kotae.SchedulePlanner
                         }
                     }
                 }
+            }
+            if (hasSeasonChanged)
+            {
+                PopulateEventsForSeason(m_ActiveYear, m_ActiveSeason, m_BirthdayDict, ref m_BillboardDayByDay);
             }
         }
 

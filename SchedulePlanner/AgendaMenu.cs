@@ -182,14 +182,14 @@ namespace kotae.SchedulePlanner
         {
             b.Draw(Game1.fadeToBlackRect, Game1.graphics.GraphicsDevice.Viewport.Bounds, Color.Black * 0.75f);
             IClickableMenu.drawTextureBox(b, Game1.mouseCursors, new Rectangle(384, 373, 18, 18), this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height, Color.White, 4f, true);
-            string seasonHeaderStr = Utility.getSeasonNameFromNumber(Utility.getSeasonNumber(m_ActiveDate.Season));
+            string seasonHeaderStr = m_ActiveDate.Season.ToString();
             string yearHeaderStr = Game1.content.LoadString(@"Strings\UI:Billboard_Year", m_ActiveDate.Year);
             // need to look up how to get the localized day string
             // ^^^^ am i a fucking dumb? everyone knows arabic numbers. no need to localize them.
             // i would be truly shocked if this game actually does localize numbers
             string dateHeaderStr = m_ActiveDate.Day.ToString() + " " + seasonHeaderStr + " " + yearHeaderStr;
             // the drawStringWithScrollXX draws the string with a fancy ribbon background
-            SpriteText.drawStringWithScrollCenteredAt(b, dateHeaderStr, this.xPositionOnScreen + this.width / 2, this.yPositionOnScreen - 64, "", 1f, -1, 0, 0.88f, false);
+            SpriteText.drawStringWithScrollCenteredAt(b, dateHeaderStr, this.xPositionOnScreen + this.width / 2, this.yPositionOnScreen - 64);
             // TO-DO:
             // draw page up / page down buttons
             if (m_ActivePageIndex > 0)
@@ -204,7 +204,7 @@ namespace kotae.SchedulePlanner
             int stringPosX, stringPosY;
             bool cursorHighlight;
             Color bgColor;
-            int strColorIndex = -1;
+            Color strColor = SpriteText.color_White;
             for (int taskBtnIndex = 0; taskBtnIndex < K_MAXTASKSPERPAGE; taskBtnIndex++)
             {
                 int taskIndex = (m_ActivePageIndex * K_MAXTASKSPERPAGE) + taskBtnIndex;
@@ -223,24 +223,25 @@ namespace kotae.SchedulePlanner
                     // draw different color background depending on type of task
                     cursorHighlight = _State == EMenuState.Viewing ? m_TaskBtns[taskBtnIndex].containsPoint(Game1.getOldMouseX(), Game1.getOldMouseY()) ? true : false : false;
                     bgColor = cursorHighlight ? Color.Wheat : Color.White;
-                    strColorIndex = -1;
+                    strColor = Game1.textColor;
                     if (taskIndex < m_TotalTasks)
                     {
                         if (taskIndex >= m_NonrecurrentTasks.Count + m_WeeklyTasks.Count)
                         {
                             // we're on daily tasks now
                             displayStr = m_DailyTasks[taskIndex - (m_NonrecurrentTasks.Count + m_WeeklyTasks.Count)].Task;
-                            strColorIndex = 5;
+                            strColor = SpriteText.color_Orange;
                         }
                         else if (taskIndex >= m_NonrecurrentTasks.Count)
                         {
                             // we're on weekly tasks
                             displayStr = m_WeeklyTasks[taskIndex - m_NonrecurrentTasks.Count].Task;
-                            strColorIndex = 3;
+                            strColor = SpriteText.color_Purple;
                         }
                         else if (taskIndex < m_NonrecurrentTasks.Count)
                         {
                             displayStr = m_NonrecurrentTasks[taskIndex].Task;
+                            strColor = SpriteText.color_White;
                         }
                         stringPosX = m_TaskBtns[taskBtnIndex].bounds.X + 20;
                         stringPosY = m_TaskBtns[taskBtnIndex].bounds.Y + 22;
@@ -273,10 +274,9 @@ namespace kotae.SchedulePlanner
                         stringPosY = m_TaskBtns[taskBtnIndex].bounds.Y + 22;
                     }
                     IClickableMenu.drawTextureBox(b, Game1.mouseCursors, new Rectangle(384, 396, 15, 15), m_TaskBtns[taskBtnIndex].bounds.X, m_TaskBtns[taskBtnIndex].bounds.Y, m_TaskBtns[taskBtnIndex].bounds.Width, m_TaskBtns[taskBtnIndex].bounds.Height, bgColor, 4f, false);
-                    SpriteText.drawString(b, displayStr, stringPosX, stringPosY, 999999, -1, 999999, 1f, 0.88f, false, -1, "", strColorIndex);
+                    SpriteText.drawString(b, displayStr, stringPosX, stringPosY, color: strColor);
                 }
             }
-
 
             // close button (only thing done in base), the mouse, and hover text
             base.draw(b);
@@ -284,7 +284,7 @@ namespace kotae.SchedulePlanner
             base.drawMouse(b);
             if (this.hoverText.Length > 0)
             {
-                IClickableMenu.drawHoverText(b, this.hoverText, Game1.dialogueFont, 0, 0, -1, null, -1, null, null, 0, -1, -1, -1, -1, 1f, null, null);
+                IClickableMenu.drawHoverText(b, this.hoverText, Game1.dialogueFont);
             }
         }
 
